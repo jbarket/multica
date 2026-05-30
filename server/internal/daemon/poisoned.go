@@ -105,6 +105,16 @@ func classifyPoisonedError(errMsg string) (string, bool) {
 	if strings.Contains(lowered, "invalid_request_error") && strings.Contains(lowered, "400") {
 		return FailureReasonAPIInvalidRequest, true
 	}
+	// Anthropic also rejects 400s when thinking/redacted_thinking blocks in a
+	// prior assistant turn were modified during re-serialisation. Claude Code
+	// CLI may not include "invalid_request_error" in the surfaced error string
+	// for this shape; match it explicitly so the session is excluded from the
+	// resume lookup and the next run does not loop on the same 400.
+	if strings.Contains(lowered, "400") &&
+		(strings.Contains(lowered, "thinking") || strings.Contains(lowered, "redacted_thinking")) &&
+		strings.Contains(lowered, "cannot be modified") {
+		return FailureReasonAPIInvalidRequest, true
+	}
 	return "", false
 }
 

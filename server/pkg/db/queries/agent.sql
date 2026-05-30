@@ -367,14 +367,19 @@ RETURNING *;
 -- base64, etc.), or a Codex semantic inactivity timeout whose recorded
 -- session may replay the same stuck state.
 --
--- The error-text ILIKE clause is defense-in-depth for the api_invalid_request
+-- The error-text ILIKE clauses are defense-in-depth for the api_invalid_request
 -- shape: a legacy row tagged 'agent_error' (pre-MUL-1921), a deploy-window
 -- row that the old code wrote between migration and rollout, or a future
 -- error format that escapes the daemon classifier all still get filtered
 -- here as long as the canonical Anthropic 400 marker is present in the
 -- error text. Migration 079 backfills the failure_reason column itself,
--- so observability stays accurate; this clause guarantees session resume
+-- so observability stays accurate; these clauses guarantee session resume
 -- never picks up a bad session even when failure_reason hasn't caught up.
+--
+-- The second ILIKE clause catches thinking-block 400s specifically: Claude
+-- Code CLI may not include "invalid_request_error" in the surfaced error for
+-- this shape, so we match on the "cannot be modified" fragment that Anthropic
+-- includes in every thinking-block rejection.
 SELECT session_id, work_dir, runtime_id FROM agent_task_queue
 WHERE agent_id = $1 AND issue_id = $2
   AND (
@@ -383,6 +388,8 @@ WHERE agent_id = $1 AND issue_id = $2
       status = 'failed'
       AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity')
       AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%invalid_request_error%')
+      AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%cannot be modified%'
+               AND (COALESCE(error, '') ILIKE '%thinking%' OR COALESCE(error, '') ILIKE '%redacted_thinking%'))
     )
   )
   AND session_id IS NOT NULL

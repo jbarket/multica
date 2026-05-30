@@ -2732,6 +2732,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			thinkingLevel = ""
 		}
 	}
+	// Before resuming a Claude session, strip any thinking/redacted_thinking
+	// blocks from the prior turn's session JSONL. Anthropic cryptographically
+	// signs thinking blocks and rejects them if they are modified in any way
+	// during re-serialisation. Stripping them entirely is safe: the API
+	// accepts history with no thinking blocks, and text + tool_use/tool_result
+	// blocks provide sufficient context for the continuation run.
+	if provider == "claude" && task.PriorSessionID != "" {
+		stripClaudeSessionThinkingBlocks(env.WorkDir, task.PriorSessionID, taskLog)
+	}
 	execOpts := agent.ExecOptions{
 		Cwd:                       env.WorkDir,
 		Model:                     model,
