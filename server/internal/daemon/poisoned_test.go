@@ -157,6 +157,34 @@ func TestClassifyPoisonedError(t *testing.T) {
 			errMsg: "claude execution timeout after 10m",
 			wantOK: false,
 		},
+		// Thinking-block 400s: Claude Code CLI may not include
+		// "invalid_request_error" in the surfaced error for this shape.
+		{
+			name:       "thinking block cannot be modified - full API JSON",
+			errMsg:     `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.17: ` + "`thinking`" + ` or ` + "`redacted_thinking`" + ` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response."}}`,
+			wantOK:     true,
+			wantReason: FailureReasonAPIInvalidRequest,
+		},
+		{
+			// Claude Code CLI sometimes surfaces only the human-readable message
+			// without the JSON envelope, which omits "invalid_request_error".
+			name:       "thinking block cannot be modified - human-readable only",
+			errMsg:     "API Error: 400 messages.1.content.17: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.",
+			wantOK:     true,
+			wantReason: FailureReasonAPIInvalidRequest,
+		},
+		{
+			name:       "redacted_thinking block cannot be modified",
+			errMsg:     "API Error: 400 messages.2.content.5: `redacted_thinking` blocks in the latest assistant message cannot be modified.",
+			wantOK:     true,
+			wantReason: FailureReasonAPIInvalidRequest,
+		},
+		{
+			// "thinking" appearing in an unrelated context must not be classified.
+			name:   "thinking in unrelated 400 context does not poison",
+			errMsg: "API Error: 400 thinking about your request: invalid parameter",
+			wantOK: false,
+		},
 	}
 
 	for _, tc := range cases {
