@@ -681,6 +681,14 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// Expand bare issue identifiers (e.g. MUL-117) into mention links.
 	req.Content = mention.ExpandIssueIdentifiers(r.Context(), h.Queries, issue.WorkspaceID, req.Content)
 
+	// Validate-on-post: reject if any agent/member mention cannot be dispatched.
+	// This is the server-side fail-loud gate — the dispatch must never silently
+	// evaporate on a bad UUID (see SLE-140).
+	if err := h.validateMentions(r.Context(), req.Content, issue.WorkspaceID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// NOTE: Comment content is stored as Markdown source. XSS is handled at the
 	// rendering layer (rehype-sanitize) and at the editor layer
 	// (@tiptap/markdown with html:false). Running an HTML sanitizer here would

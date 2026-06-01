@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // authRequestWithAgent makes an authenticated request with X-Agent-ID +
@@ -80,6 +81,19 @@ func countPendingTasks(t *testing.T, issueID string) int {
 		issueID).Scan(&count)
 	if err != nil {
 		t.Fatalf("failed to count pending tasks: %v", err)
+	}
+	return count
+}
+
+// countPendingTasksForAgent returns queued/dispatched task count scoped to one agent on an issue.
+func countPendingTasksForAgent(t *testing.T, issueID, agentID string) int {
+	t.Helper()
+	var count int
+	err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued', 'dispatched')`,
+		issueID, agentID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to count pending tasks for agent: %v", err)
 	}
 	return count
 }
@@ -157,6 +171,37 @@ func createSecondAgent(t *testing.T) string {
 		authRequest(t, "POST", "/api/agents/"+id+"/archive?workspace_id="+testWorkspaceID, nil)
 	})
 	return id
+}
+
+// createEphemeralAgent creates a live workspace agent with a unique name and
+// hard-deletes it (rather than archiving) on cleanup. Use this when the test
+// needs a real agent UUID that must not leave a same-name tombstone behind —
+// avoiding the unique-constraint 409 that arises when createSecondAgent's
+// archived row collides with a later test that tries to create the same name.
+func createEphemeralAgent(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	var runtimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id FROM agent_runtime WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&runtimeID); err != nil {
+		t.Fatalf("createEphemeralAgent: load runtime: %v", err)
+	}
+	name := fmt.Sprintf("Ephemeral Test Agent %d", time.Now().UnixNano())
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config,
+		                   runtime_id, visibility, max_concurrent_tasks, owner_id)
+		VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'workspace', 1, $4)
+		RETURNING id
+	`, testWorkspaceID, name, runtimeID, testUserID).Scan(&agentID); err != nil {
+		t.Fatalf("createEphemeralAgent: insert: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, agentID)
+	})
+	return agentID
 }
 
 // createIssueAssignedToAgent creates a todo issue assigned to the given agent.
@@ -257,11 +302,19 @@ func TestCommentTriggerOnComment(t *testing.T) {
 
 	t.Run("top-level comment mentioning only others suppresses trigger", func(t *testing.T) {
 		clearTasks(t, issueID)
-		// Mention a fake agent UUID that is not the assignee.
-		content := "[@SomeoneElse](mention://agent/00000000-0000-0000-0000-000000000001) what do you think?"
+		// Mention a real but non-assignee agent — the assignee's on_comment
+		// trigger must not fire because the user is addressing someone else.
+		// We check only the assignee's task count; the other agent receiving a
+		// mention task is expected and correct. (Fabricated UUIDs are rejected
+		// as of SLE-140 — use a real workspace agent here.)
+		// createEphemeralAgent is used instead of createSecondAgent to avoid the
+		// name-collision 409 that arises when the archived "Second Test Agent"
+		// row from another test blocks a same-name create.
+		otherAgentID := createEphemeralAgent(t)
+		content := fmt.Sprintf("[@SomeoneElse](mention://agent/%s) what do you think?", otherAgentID)
 		postComment(t, issueID, content, nil)
-		if n := countPendingTasks(t, issueID); n != 0 {
-			t.Errorf("expected 0 pending tasks, got %d", n)
+		if n := countPendingTasksForAgent(t, issueID, agentID); n != 0 {
+			t.Errorf("expected 0 pending tasks for assignee (on_comment suppressed), got %d", n)
 		}
 	})
 
