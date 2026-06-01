@@ -1048,6 +1048,14 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// Expand bare issue identifiers (same pipeline as CreateComment).
 	req.Content = mention.ExpandIssueIdentifiers(r.Context(), h.Queries, wsUUID, req.Content)
 
+	// Validate-on-post: reject if any agent/member mention cannot be dispatched.
+	// The edit path is an equal dispatch vector — a new unresolvable mention
+	// added on edit must fail loud, not silently strand (see SLE-140).
+	if err := h.validateMentions(r.Context(), req.Content, wsUUID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	comment, err := h.Queries.UpdateComment(r.Context(), db.UpdateCommentParams{
 		ID:      commentUUID,
 		Content: req.Content,

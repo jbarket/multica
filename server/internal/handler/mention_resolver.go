@@ -32,8 +32,8 @@ type MentionResolution struct {
 //
 // mention://issue/… and mention://all/… are side-effect-free; they always
 // return "resolved" so the caller can safely pass any mention type here.
-// Both validate-on-post (validateMentions) and dispatch (enqueueMentionedAgentTasks)
-// call this function — they can never disagree on target resolution.
+// validateMentions (validate-on-post) calls this function so that validation
+// and CreateComment/UpdateComment share a single resolution path.
 func (h *Handler) resolveMention(ctx context.Context, m util.Mention, workspaceID pgtype.UUID) MentionResolution {
 	mentionURL := fmt.Sprintf("mention://%s/%s", m.Type, m.ID)
 	switch m.Type {
