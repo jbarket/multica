@@ -915,12 +915,29 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 				h.lastTaskWasLeader(ctx, issue.ID, leaderID) {
 				continue
 			}
-			// Verify leader agent is ready (has runtime, not archived).
+			// resolveMention is the targeting authority: it checks the leader
+			// agent's existence and archived status so the squad dispatch path
+			// routes through the same resolution logic as direct agent mentions.
+			leaderMention := util.Mention{Type: "agent", ID: uuidToString(leaderID)}
+			leaderRes := h.resolveMention(ctx, leaderMention, issue.WorkspaceID)
+			if leaderRes.Status != "resolved" {
+				slog.Warn("enqueueMentionedAgentTasks: squad leader is not a resolvable agent",
+					"mention_url", leaderRes.MentionURL, "reason", leaderRes.Reason, "issue_id", uuidToString(issue.ID))
+				continue
+			}
+			// Load the full agent record for dispatch-specific gates (runtime, visibility).
 			agent, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
 				ID:          leaderID,
 				WorkspaceID: issue.WorkspaceID,
 			})
-			if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+			if err != nil {
+				slog.Error("enqueueMentionedAgentTasks: squad leader vanished between resolution and dispatch",
+					"leader_id", uuidToString(leaderID), "squad_id", m.ID, "issue_id", uuidToString(issue.ID), "error", err)
+				continue
+			}
+			if !agent.RuntimeID.Valid {
+				slog.Warn("enqueueMentionedAgentTasks: squad leader has no runtime assigned, dispatch skipped",
+					"leader_id", uuidToString(leaderID), "squad_id", m.ID, "issue_id", uuidToString(issue.ID))
 				continue
 			}
 			// Private-agent gate: prevent triggering a private leader via squad mention.
@@ -944,17 +961,39 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 			continue
 		}
 		agentUUID := parseUUID(m.ID)
-		// Load the agent scoped to the current issue's workspace. Using the
-		// bare GetAgent here would let a mention resolve to an agent in a
-		// different workspace, and the visibility check below would then be
-		// applied against the wrong workspace's roles (a workspace owner in
-		// THIS workspace would pass the gate for a private agent that lives
-		// in someone else's workspace).
+		// resolveMention is the single targeting authority for existence and
+		// archived status. Both validate-on-post (validateMentions) and this
+		// dispatch path call it so the two can never disagree on whether a
+		// target is dispatchable. workspace-scoping is handled inside
+		// resolveMention via GetAgentInWorkspace (the workspace ID is passed
+		// through), so cross-workspace resolution cannot occur.
+		res := h.resolveMention(ctx, m, issue.WorkspaceID)
+		if res.Status != "resolved" {
+			// validate-on-post should have blocked this comment when the
+			// agent was unresolvable. Reaching here means the agent was valid
+			// at post time but became unresolvable (archived or deleted)
+			// before dispatch ran — log loudly so the event is not silently lost.
+			slog.Warn("enqueueMentionedAgentTasks: mention no longer resolvable at dispatch time",
+				"mention_url", res.MentionURL, "reason", res.Reason, "issue_id", uuidToString(issue.ID))
+			continue
+		}
+		// Load the full agent record for dispatch-specific gates: runtime
+		// assignment and visibility. These are not part of mention resolution.
 		agent, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
 			ID:          agentUUID,
 			WorkspaceID: issue.WorkspaceID,
 		})
-		if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+		if err != nil {
+			// Should not happen: resolveMention confirmed the agent is live.
+			slog.Error("enqueueMentionedAgentTasks: agent vanished between resolution and dispatch",
+				"agent_id", m.ID, "issue_id", uuidToString(issue.ID), "error", err)
+			continue
+		}
+		if !agent.RuntimeID.Valid {
+			// A live, non-archived agent with no runtime cannot be dispatched.
+			// Log loudly rather than silently strand the mention.
+			slog.Warn("enqueueMentionedAgentTasks: live agent has no runtime assigned, dispatch skipped",
+				"agent_id", m.ID, "issue_id", uuidToString(issue.ID))
 			continue
 		}
 		// Private-agent gate (member→private requires allowed_principals;

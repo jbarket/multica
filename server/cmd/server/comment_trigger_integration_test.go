@@ -660,6 +660,45 @@ func TestCommentTriggerCoalescing(t *testing.T) {
 // assigned agent on a done issue still triggers execution. Previously the
 // assignee was unconditionally skipped in the mention path (assuming
 // on_comment handled it), but on_comment is suppressed for terminal statuses.
+// TestResolverDispatchAgreement_LiveAgent confirms that validate-on-post and
+// the dispatch path agree on a live agent: a comment mentioning a live agent
+// must both pass validateMentions (HTTP 201) and result in a task being enqueued
+// (dispatch agrees with validate). This is the regression test for SLE-140's
+// acceptance criterion that resolveMention is the single targeting authority.
+//
+// Runtime-less live agent note: the agent.RuntimeID.Valid == false branch in
+// enqueueMentionedAgentTasks now emits a loud slog.Warn rather than a silent
+// continue, but it cannot be exercised in this DB test suite because the schema
+// enforces runtime_id NOT NULL. The loud-log path is the defense-in-depth for
+// future schema changes; the code is the test.
+func TestResolverDispatchAgreement_LiveAgent(t *testing.T) {
+	agentID := createEphemeralAgent(t)
+	issueID := createIssue(t, "Resolver dispatch agreement test")
+	t.Cleanup(func() {
+		clearTasks(t, issueID)
+		authRequest(t, "DELETE", "/api/issues/"+issueID, nil).Body.Close()
+	})
+
+	content := fmt.Sprintf("[@Agent](mention://agent/%s) please handle this", agentID)
+
+	// validate-on-post: comment must be accepted (no HTTP 400 for unresolvable mention).
+	resp := authRequest(t, "POST", "/api/issues/"+issueID+"/comments", map[string]any{
+		"content": content,
+		"type":    "comment",
+	})
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("post comment: expected 201, got %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	// dispatch must agree: a task must be enqueued for the live agent.
+	if n := countPendingTasksForAgent(t, issueID, agentID); n != 1 {
+		t.Errorf("validate/dispatch agreement: expected 1 pending task for live agent, got %d", n)
+	}
+}
+
 func TestCommentTriggerMentionAssigneeDoneIssue(t *testing.T) {
 	agentID := getAgentID(t)
 

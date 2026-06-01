@@ -32,8 +32,10 @@ type MentionResolution struct {
 //
 // mention://issue/… and mention://all/… are side-effect-free; they always
 // return "resolved" so the caller can safely pass any mention type here.
-// validateMentions (validate-on-post) calls this function so that validation
-// and CreateComment/UpdateComment share a single resolution path.
+//
+// Both validate-on-post (validateMentions → CreateComment/UpdateComment) and
+// the dispatch path (enqueueMentionedAgentTasks) call this function so the
+// two can never disagree on whether a target is resolvable.
 func (h *Handler) resolveMention(ctx context.Context, m util.Mention, workspaceID pgtype.UUID) MentionResolution {
 	mentionURL := fmt.Sprintf("mention://%s/%s", m.Type, m.ID)
 	switch m.Type {
@@ -99,9 +101,9 @@ func (h *Handler) resolveMention(ctx context.Context, m util.Mention, workspaceI
 // naming every failing mention if any agent/member mention is unresolved or
 // archived. mention://issue/… and mention://all/… links are ignored.
 //
-// This is the fail-loud gate wired into CreateComment: any agent mention that
-// cannot be dispatched causes the comment create to be rejected with a clear
-// error rather than silently dropping the dispatch.
+// This is the fail-loud gate wired into CreateComment and UpdateComment: any
+// agent mention that cannot be dispatched causes the operation to be rejected
+// with a clear error rather than silently dropping the dispatch.
 func (h *Handler) validateMentions(ctx context.Context, content string, workspaceID pgtype.UUID) error {
 	mentions := util.ParseMentions(content)
 	var failures []string
