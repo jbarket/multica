@@ -132,11 +132,22 @@ func normalizeServerEnvEntries(serverRaw json.RawMessage) (json.RawMessage, bool
 	}
 	sort.Strings(keys)
 
-	newEnvRaw, err := json.Marshal(env)
-	if err != nil {
-		return serverRaw, false
+	var envBuf bytes.Buffer
+	envBuf.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			envBuf.WriteByte(',')
+		}
+		kj, merr := json.Marshal(k)
+		if merr != nil {
+			return serverRaw, false
+		}
+		envBuf.Write(kj)
+		envBuf.WriteByte(':')
+		envBuf.Write(env[k])
 	}
-	server["env"] = newEnvRaw
+	envBuf.WriteByte('}')
+	server["env"] = envBuf.Bytes()
 
 	result, err := json.Marshal(server)
 	if err != nil {

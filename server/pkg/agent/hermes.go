@@ -1299,8 +1299,9 @@ func buildACPMcpServers(raw json.RawMessage, logger *slog.Logger) ([]any, error)
 //
 // Env values are decoded via unwrapMcpEnvValue so both plain JSON strings and
 // the Claude Code extended format ({"type":"plain","value":"..."}) are
-// accepted. Entries that decode to an empty string (unknown wrapper type,
-// nested object, array, …) are silently dropped.
+// accepted. Entries that fail to decode or decode to an empty string
+// (unknown wrapper type, nested object, array, wrapped empty value, …) are
+// silently dropped.
 func convertACPMcpServer(name string, raw json.RawMessage) (map[string]any, error) {
 	var entry struct {
 		Type    string                     `json:"type"`
@@ -1332,7 +1333,7 @@ func convertACPMcpServer(name string, raw json.RawMessage) (map[string]any, erro
 		for _, k := range envKeys {
 			v := unwrapMcpEnvValue(entry.Env[k])
 			if v == "" {
-				continue // skip unrecognised wrapper types
+				continue // skip decode failures and empty env values
 			}
 			envArr = append(envArr, map[string]any{
 				"name":  k,

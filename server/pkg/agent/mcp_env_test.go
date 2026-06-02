@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -173,6 +174,51 @@ func TestNormalizeMcpConfigEnvMixedWrappedAndPlain(t *testing.T) {
 	}
 	if srv["WRAPPED"] != "unwrapped-value" {
 		t.Errorf("WRAPPED: got %q, want unwrapped-value", srv["WRAPPED"])
+	}
+}
+
+func TestNormalizeMcpConfigEnvEnvKeysAreSorted(t *testing.T) {
+	t.Parallel()
+	// When wrapped values are unwrapped the resulting env object must have
+	// its keys in sorted order so the output is deterministic across runs.
+	raw := json.RawMessage(`{"mcpServers":{"srv":{"command":"cmd","env":{"ZEBRA":{"type":"plain","value":"z"},"APPLE":{"type":"plain","value":"a"},"MANGO":{"type":"plain","value":"m"}}}}}`)
+	got, err := normalizeMcpConfigEnv(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Extract just the env object bytes and check key ordering directly.
+	var outer struct {
+		McpServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(got, &outer); err != nil {
+		t.Fatalf("unmarshal outer: %v", err)
+	}
+	var srv struct {
+		Env json.RawMessage `json:"env"`
+	}
+	if err := json.Unmarshal(outer.McpServers["srv"], &srv); err != nil {
+		t.Fatalf("unmarshal srv: %v", err)
+	}
+	// Decode into a slice of key-value pairs by re-using json.Decoder token stream.
+	dec := json.NewDecoder(bytes.NewReader(srv.Env))
+	dec.Token() // '{'
+	var keys []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("token: %v", err)
+		}
+		keys = append(keys, tok.(string))
+		dec.Token() // skip value
+	}
+	want := []string{"APPLE", "MANGO", "ZEBRA"}
+	if len(keys) != len(want) {
+		t.Fatalf("key count: got %v, want %v", keys, want)
+	}
+	for i, k := range keys {
+		if k != want[i] {
+			t.Errorf("keys[%d]: got %q, want %q", i, k, want[i])
+		}
 	}
 }
 
