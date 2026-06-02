@@ -397,6 +397,66 @@ func TestBuildACPMcpServersReturnsErrorOnMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestBuildACPMcpServersUnwrapsWrappedEnvValues(t *testing.T) {
+	t.Parallel()
+	// Env values in {type:"plain",value:"..."} format must be unwrapped to
+	// their raw string before being placed in the ACP env array. This mirrors
+	// the Claude Code settings format where env vars carry a type discriminator.
+	raw := json.RawMessage(`{"mcpServers":{"loom":{"command":"loom","args":["mcp"],"env":{"LOOM_CONTEXT_DIR":{"type":"plain","value":"/home/art/.config/loom/art"}}}}}`)
+	got, err := buildACPMcpServers(raw, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len: got %d, want 1", len(got))
+	}
+	entry, ok := got[0].(map[string]any)
+	if !ok {
+		t.Fatalf("entry type: got %T, want map[string]any", got[0])
+	}
+	envArr, ok := entry["env"].([]map[string]any)
+	if !ok {
+		t.Fatalf("env type: got %T, want []map[string]any", entry["env"])
+	}
+	if len(envArr) != 1 {
+		t.Fatalf("len(env): got %d, want 1", len(envArr))
+	}
+	if envArr[0]["name"] != "LOOM_CONTEXT_DIR" {
+		t.Errorf("env[0].name: got %v, want LOOM_CONTEXT_DIR", envArr[0]["name"])
+	}
+	if envArr[0]["value"] != "/home/art/.config/loom/art" {
+		t.Errorf("env[0].value: got %v, want /home/art/.config/loom/art (raw string, not wrapped object)", envArr[0]["value"])
+	}
+}
+
+func TestBuildACPMcpServersMixedWrappedAndPlainEnv(t *testing.T) {
+	t.Parallel()
+	// Mixed: some env values plain strings, some wrapped. Both should decode.
+	raw := json.RawMessage(`{"mcpServers":{"srv":{"command":"cmd","env":{"PLAIN":"already-plain","WRAPPED":{"type":"plain","value":"unwrapped-value"}}}}}`)
+	got, err := buildACPMcpServers(raw, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len: got %d, want 1", len(got))
+	}
+	entry := got[0].(map[string]any)
+	envArr, ok := entry["env"].([]map[string]any)
+	if !ok {
+		t.Fatalf("env type: got %T, want []map[string]any", entry["env"])
+	}
+	// Env entries are sorted by key: PLAIN, WRAPPED.
+	if len(envArr) != 2 {
+		t.Fatalf("len(env): got %d, want 2", len(envArr))
+	}
+	if envArr[0]["name"] != "PLAIN" || envArr[0]["value"] != "already-plain" {
+		t.Errorf("env[0]: got %v, want {name:PLAIN,value:already-plain}", envArr[0])
+	}
+	if envArr[1]["name"] != "WRAPPED" || envArr[1]["value"] != "unwrapped-value" {
+		t.Errorf("env[1]: got %v, want {name:WRAPPED,value:unwrapped-value}", envArr[1])
+	}
+}
+
 // ── hermesToolNameFromTitle ──
 
 func TestHermesToolNameFromTitle(t *testing.T) {

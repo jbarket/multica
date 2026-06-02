@@ -634,14 +634,21 @@ func filterCustomArgs(args []string, blocked map[string]blockedArgMode, logger *
 	return filtered
 }
 
-// writeMcpConfigToTemp writes raw MCP config JSON to a temporary file and returns
-// its path. The caller is responsible for removing the file when done.
+// writeMcpConfigToTemp normalizes the MCP config JSON (unwrapping any
+// {type:"plain",value:"..."} env entries) and writes the result to a
+// temporary file. The caller is responsible for removing the file when done.
 func writeMcpConfigToTemp(raw json.RawMessage) (string, error) {
+	normalized, err := normalizeMcpConfigEnv(raw)
+	if err != nil {
+		// Malformed top-level JSON: fail closed so the caller surfaces the
+		// real error rather than launching the agent with a broken config.
+		return "", fmt.Errorf("normalize mcp config env: %w", err)
+	}
 	f, err := os.CreateTemp("", "multica-mcp-*.json")
 	if err != nil {
 		return "", fmt.Errorf("create mcp config temp file: %w", err)
 	}
-	if _, err := f.Write(raw); err != nil {
+	if _, err := f.Write(normalized); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", fmt.Errorf("write mcp config temp file: %w", err)

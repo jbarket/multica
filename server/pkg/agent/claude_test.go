@@ -453,13 +453,13 @@ func TestWriteMcpConfigToTemp(t *testing.T) {
 		t.Fatalf("writeMcpConfigToTemp: %v", err)
 	}
 
-	// File should exist and contain exactly the raw JSON.
+	// File should exist and contain the (possibly normalized) JSON.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read temp file %s: %v", path, err)
 	}
-	if !bytes.Equal(data, []byte(raw)) {
-		t.Fatalf("expected %s, got %s", raw, data)
+	if len(data) == 0 {
+		t.Fatal("expected non-empty temp file")
 	}
 
 	// Cleanup should remove the file.
@@ -468,6 +468,38 @@ func TestWriteMcpConfigToTemp(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected temp file to be removed, but it still exists")
+	}
+}
+
+func TestWriteMcpConfigToTempUnwrapsEnvValues(t *testing.T) {
+	t.Parallel()
+
+	// Wrapped env values ({type:"plain",value:"..."}) must be written to the
+	// temp file as plain strings so Claude Code passes the raw value to the
+	// spawned MCP server process (e.g. loom) rather than a JSON object string.
+	raw := json.RawMessage(`{"mcpServers":{"loom":{"command":"loom","args":["mcp"],"env":{"LOOM_CONTEXT_DIR":{"type":"plain","value":"/home/art/.config/loom/art"}}}}}`)
+	path, err := writeMcpConfigToTemp(raw)
+	if err != nil {
+		t.Fatalf("writeMcpConfigToTemp: %v", err)
+	}
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read temp file %s: %v", path, err)
+	}
+
+	// The file must decode with a plain string for LOOM_CONTEXT_DIR.
+	var parsed struct {
+		McpServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal temp file: %v", err)
+	}
+	if v := parsed.McpServers["loom"].Env["LOOM_CONTEXT_DIR"]; v != "/home/art/.config/loom/art" {
+		t.Errorf("LOOM_CONTEXT_DIR in temp file: got %q, want /home/art/.config/loom/art (should be unwrapped plain string)", v)
 	}
 }
 

@@ -1296,14 +1296,19 @@ func buildACPMcpServers(raw json.RawMessage, logger *slog.Logger) ([]any, error)
 // convertACPMcpServer converts a single Claude-style entry into the ACP
 // McpServer wire shape. Returns an error for entries that can't be
 // classified (no command and no url).
+//
+// Env values are decoded via unwrapMcpEnvValue so both plain JSON strings and
+// the Claude Code extended format ({"type":"plain","value":"..."}) are
+// accepted. Entries that decode to an empty string (unknown wrapper type,
+// nested object, array, …) are silently dropped.
 func convertACPMcpServer(name string, raw json.RawMessage) (map[string]any, error) {
 	var entry struct {
-		Type    string            `json:"type"`
-		Command string            `json:"command"`
-		Args    []string          `json:"args"`
-		Env     map[string]string `json:"env"`
-		URL     string            `json:"url"`
-		Headers map[string]string `json:"headers"`
+		Type    string                     `json:"type"`
+		Command string                     `json:"command"`
+		Args    []string                   `json:"args"`
+		Env     map[string]json.RawMessage `json:"env"`
+		URL     string                     `json:"url"`
+		Headers map[string]string          `json:"headers"`
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return nil, fmt.Errorf("parse entry: %w", err)
@@ -1317,11 +1322,21 @@ func convertACPMcpServer(name string, raw json.RawMessage) (map[string]any, erro
 		if args == nil {
 			args = []string{}
 		}
+		// Sort env keys for determinism; unwrap any wrapped values.
+		envKeys := make([]string, 0, len(entry.Env))
+		for k := range entry.Env {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
 		envArr := make([]map[string]any, 0, len(entry.Env))
-		for _, k := range sortedStringMapKeys(entry.Env) {
+		for _, k := range envKeys {
+			v := unwrapMcpEnvValue(entry.Env[k])
+			if v == "" {
+				continue // skip unrecognised wrapper types
+			}
 			envArr = append(envArr, map[string]any{
 				"name":  k,
-				"value": entry.Env[k],
+				"value": v,
 			})
 		}
 		return map[string]any{
