@@ -1,11 +1,15 @@
 package util
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Mention represents a parsed @mention from markdown content.
 type Mention struct {
-	Type string // "member", "agent", "issue", or "all"
-	ID   string // user_id, agent_id, issue_id, or "all"
+	Type  string // "member", "agent", "issue", or "all"
+	ID    string // user_id, agent_id, issue_id, or "all"
+	Label string // link text with leading @ stripped (e.g. "Code" from "[@Code]")
 }
 
 // MentionRe matches [@Label](mention://type/id) or [Label](mention://issue/id) in markdown.
@@ -21,6 +25,7 @@ func (m Mention) IsMentionAll() bool {
 }
 
 // ParseMentions extracts deduplicated mentions from markdown content.
+// The Label field is populated with the link text, stripped of any leading @.
 func ParseMentions(content string) []Mention {
 	matches := MentionRe.FindAllStringSubmatch(content, -1)
 	seen := make(map[string]bool)
@@ -31,7 +36,8 @@ func ParseMentions(content string) []Mention {
 			continue
 		}
 		seen[key] = true
-		result = append(result, Mention{Type: m[2], ID: m[3]})
+		label := strings.TrimPrefix(strings.TrimSpace(m[1]), "@")
+		result = append(result, Mention{Type: m[2], ID: m[3], Label: label})
 	}
 	return result
 }

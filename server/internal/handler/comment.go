@@ -1161,7 +1161,6 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 		if m.Type != "agent" {
 			continue
 		}
-		agentUUID := parseUUID(m.ID)
 		// resolveMention is the single targeting authority for existence and
 		// archived status. Both validate-on-post (validateMentions) and this
 		// dispatch path call it so the two can never disagree on whether a
@@ -1169,7 +1168,17 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 		// resolveMention via GetAgentInWorkspace (the workspace ID is passed
 		// through), so cross-workspace resolution cannot occur.
 		res := h.resolveMention(ctx, m, issue.WorkspaceID)
-		if res.Status != "resolved" {
+		var agentUUID pgtype.UUID
+		switch res.Status {
+		case "resolved":
+			agentUUID = parseUUID(m.ID)
+		case "self-healed":
+			// UUID was stale but the link text matched exactly one live agent.
+			// Emit a visible diagnostic system comment so the self-correction is
+			// not silent, then dispatch to the real agent.
+			h.emitSelfHealDiagnostic(ctx, issue, comment, res.Diagnostic)
+			agentUUID = parseUUID(res.SelfHealedAgentID)
+		default:
 			// validate-on-post should have blocked this comment when the
 			// agent was unresolvable. Reaching here means the agent was valid
 			// at post time but became unresolvable (archived or deleted)
@@ -1187,14 +1196,14 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 		if err != nil {
 			// Should not happen: resolveMention confirmed the agent is live.
 			slog.Error("enqueueMentionedAgentTasks: agent vanished between resolution and dispatch",
-				"agent_id", m.ID, "issue_id", uuidToString(issue.ID), "error", err)
+				"agent_id", uuidToString(agentUUID), "issue_id", uuidToString(issue.ID), "error", err)
 			continue
 		}
 		if !agent.RuntimeID.Valid {
 			// A live, non-archived agent with no runtime cannot be dispatched.
 			// Log loudly rather than silently strand the mention.
 			slog.Warn("enqueueMentionedAgentTasks: live agent has no runtime assigned, dispatch skipped",
-				"agent_id", m.ID, "issue_id", uuidToString(issue.ID))
+				"agent_id", uuidToString(agentUUID), "issue_id", uuidToString(issue.ID))
 			continue
 		}
 		// Private-agent gate (member→private requires allowed_principals;
@@ -1213,9 +1222,39 @@ func (h *Handler) enqueueMentionedAgentTasks(ctx context.Context, issue db.Issue
 		// Always use the current comment as the trigger so the agent reads the
 		// actual reply that mentioned it, not the thread root.
 		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, agentUUID, comment.ID); err != nil {
-			slog.Warn("enqueue mention agent task failed", "issue_id", uuidToString(issue.ID), "agent_id", m.ID, "error", err)
+			slog.Warn("enqueue mention agent task failed", "issue_id", uuidToString(issue.ID), "agent_id", uuidToString(agentUUID), "error", err)
 		}
 	}
+}
+
+// emitSelfHealDiagnostic posts a system comment as a reply to triggerComment
+// when a mention has been self-healed (stale UUID routed by name match). The
+// diagnostic is visible in the issue thread so the self-correction is never
+// silent — the comment author and reviewers can see that re-routing occurred.
+// System comments are not subject to mention-dispatch or notification listeners.
+func (h *Handler) emitSelfHealDiagnostic(ctx context.Context, issue db.Issue, triggerComment db.Comment, diagnostic string) {
+	content := "⚠️ Mention self-healed: " + diagnostic
+	diag, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  "system",
+		AuthorID:    pgtype.UUID{Valid: true}, // zero UUID, conventional for system author
+		Content:     content,
+		Type:        "system",
+		ParentID:    triggerComment.ID, // reply to the comment that carried the stale mention
+	})
+	if err != nil {
+		slog.Warn("emitSelfHealDiagnostic: failed to post system comment",
+			"issue_id", uuidToString(issue.ID), "error", err)
+		return
+	}
+	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
+		"comment":             commentToResponse(diag, nil, nil),
+		"issue_title":         issue.Title,
+		"issue_assignee_type": textToPtr(issue.AssigneeType),
+		"issue_assignee_id":   uuidToPtr(issue.AssigneeID),
+		"issue_status":        issue.Status,
+	})
 }
 
 func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
